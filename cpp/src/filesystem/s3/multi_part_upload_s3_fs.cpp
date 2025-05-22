@@ -39,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <thread>
 
 #include <aws/core/Aws.h>
@@ -804,6 +805,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
     auto client = client_lock.Move().operator->();
     if (!client) {
       LOG_STORAGE_ERROR_ << "CQX client nil";
+      throw std::runtime_error("s3 client nil from holder");
     }
     auto outcome = client->HeadObject(req);
     if (!outcome.IsSuccess()) {
