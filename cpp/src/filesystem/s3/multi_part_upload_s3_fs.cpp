@@ -801,7 +801,11 @@ class ObjectInputFile final : public io::RandomAccessFile {
     req.SetKey(ToAwsString(path_.key));
 
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    auto outcome = client_lock.Move()->HeadObject(req);
+    auto client = client_lock.Move().operator->();
+    if (!client) {
+      LOG_STORAGE_ERROR_ << "CQX client nil";
+    }
+    auto outcome = client->HeadObject(req);
     if (!outcome.IsSuccess()) {
       if (IsNotFound(outcome.GetError())) {
         return PathNotFound(path_);
