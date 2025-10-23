@@ -63,7 +63,9 @@ void S3FileSystemProducer::InitS3() {
 
     if (config_.cloud_provider == "gcp" && config_.use_iam) {
       Aws::HttpOptions http_options;
+      LOG_STORAGE_WARNING_ << "CQX Using GCP IAM for S3 authentication. Make sure the environment is set up correctly.";
       http_options.httpClientFactory_create_fn = []() {
+        LOG_STORAGE_WARNING_ << "CQX Creating Google HTTP Client Factory for GCP IAM authentication.";
         auto credentials =
             std::make_shared<google::cloud::oauth2_internal::GOOGLE_CLOUD_CPP_NS::ComputeEngineCredentials>();
         return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials);
@@ -149,6 +151,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateT
 }
 
 Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
+  LOG_STORAGE_INFO_ << "S3FileSystemProducer::Make with config: " << config_.ToString();
   InitS3();
 
   auto status = CreateS3Options();
