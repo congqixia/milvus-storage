@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <arrow/io/caching.h>
+#include <thread>
 #include <arrow/table.h>
+#include <parquet/encryption/encryption.h>
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
@@ -597,6 +599,73 @@ TEST_F(FileReaderTest, CleanFooterMetadataCacheForcesReparse) {
 
   ASSERT_STATUS_OK(fr1->Close());
   ASSERT_STATUS_OK(fr2->Close());
+}
+
+TEST_F(FileReaderTest, ReusesCachedFooterWithPlaintextAllowedDecryption) {
+  SetupOneFile();
+
+  // Milvus configures FileDecryptionProperties (key retriever +
+  // plaintext_files_allowed) even when the file is plaintext. Whether a file is
+  // encrypted is declared in its footer, not by the caller's decryption setup,
+  // so a plaintext footer must still be cached and reused across readers.
+  ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties();
+  auto key_retriever = std::make_shared<::parquet::StringKeyIdRetriever>();
+  key_retriever->PutKey("k", "0123456789abcdef0123456789abcdef");
+  ::parquet::FileDecryptionProperties::Builder builder;
+  reader_props.file_decryption_properties(
+      builder.key_retriever(key_retriever)->plaintext_files_allowed()->build());
+
+  ASSERT_AND_ASSIGN(
+      auto fr1, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_, reader_props));
+  auto metadata1 = fr1->file_metadata()->GetParquetMetadata();
+  EXPECT_FALSE(metadata1->is_encryption_algorithm_set());
+
+  // The second Make for the same file must reuse the cached footer even though
+  // the reader is configured with decryption properties.
+  ASSERT_AND_ASSIGN(
+      auto fr2, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_, reader_props));
+  auto metadata2 = fr2->file_metadata()->GetParquetMetadata();
+
+  EXPECT_EQ(metadata1.get(), metadata2.get());
+  EXPECT_EQ(FileRowGroupReader::getFooterMetadataCache().size(), 1);
+
+  ASSERT_STATUS_OK(fr1->Close());
+  ASSERT_STATUS_OK(fr2->Close());
+}
+
+TEST_F(FileReaderTest, ConcurrentMakesShareCachedFooterWithPlaintextAllowedDecryption) {
+  SetupOneFile();
+
+  ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties();
+  auto key_retriever = std::make_shared<::parquet::StringKeyIdRetriever>();
+  key_retriever->PutKey("k", "0123456789abcdef0123456789abcdef");
+  ::parquet::FileDecryptionProperties::Builder builder;
+  reader_props.file_decryption_properties(
+      builder.key_retriever(key_retriever)->plaintext_files_allowed()->build());
+
+  // Concurrent first-batch misses may duplicate the parse; after that the cache
+  // is populated and every reader shares the identical footer metadata.
+  std::mutex mu;
+  std::vector<std::shared_ptr<::parquet::FileMetaData>> metadatas;
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 8; ++i) {
+    threads.emplace_back([&]() {
+      auto reader = FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_, reader_props);
+      ASSERT_STATUS_OK(reader.status());
+      auto meta = reader.ValueOrDie()->file_metadata()->GetParquetMetadata();
+      std::lock_guard<std::mutex> lock(mu);
+      metadatas.push_back(meta);
+    });
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  ASSERT_EQ(metadatas.size(), 8);
+  for (const auto& meta : metadatas) {
+    EXPECT_EQ(meta.get(), metadatas[0].get());
+  }
+  EXPECT_EQ(FileRowGroupReader::getFooterMetadataCache().size(), 1);
 }
 
 }  // namespace milvus_storage::test
